@@ -6,18 +6,15 @@ local Network = require("network")
 
 local Serializer = {}
 
--- Save network topology and weights to a file
 function Serializer.save(net, filepath)
 	local file, err = io.open(filepath, "w")
 	if not file then
 		return false, "Failed to open file for writing: " .. tostring(err)
 	end
 
-	-- Header & Architecture
-	file:write("LUA_MLP_V1\n")
+	file:write("LUA_MLP_V2\n")
 	file:write(table.concat(net.layer_sizes, ",") .. "\n")
 
-	-- Write each layer's weights and biases
 	for i = 1, net.num_layers do
 		local w = net.weights[i]
 		file:write(string.format("W %d %d\n", w.rows, w.cols))
@@ -33,7 +30,7 @@ function Serializer.save(net, filepath)
 		file:write(string.format("B %d %d\n", b.rows, b.cols))
 		local b_strs = {}
 		for c = 1, b.cols do
-			b_strs[c] = string.format("%.8f", b.data[1][c])
+			b_strs[c] = string.format("%.8f", b.data[c])
 		end
 		file:write(table.concat(b_strs, " ") .. "\n")
 	end
@@ -42,7 +39,6 @@ function Serializer.save(net, filepath)
 	return true
 end
 
--- Load network topology and weights from a file
 function Serializer.load(filepath)
 	local file, err = io.open(filepath, "r")
 	if not file then
@@ -50,7 +46,7 @@ function Serializer.load(filepath)
 	end
 
 	local magic = file:read("*l")
-	if magic ~= "LUA_MLP_V1" then
+	if magic ~= "LUA_MLP_V2" then
 		file:close()
 		return nil, "Invalid model file format"
 	end
@@ -86,7 +82,7 @@ function Serializer.load(filepath)
 		local b_line = file:read("*l")
 		local c = 1
 		for val in string.gmatch(b_line, "[^%s]+") do
-			b_mat.data[1][c] = tonumber(val)
+			b_mat.data[c] = tonumber(val)
 			c = c + 1
 		end
 		net.biases[i] = b_mat

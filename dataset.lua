@@ -1,11 +1,9 @@
 -- dataset.lua
--- 8x8 Handwritten Digit Dataset Generator with Data Augmentation
--- Comment: Without an External basic Machine learning dataset handcoding values like this is hard so i used AI only to generate local PROTOTYPES:w
+-- 8x8 Handwritten Digit Generator with Rotation, Shift, Occlusion & Noise
 
 local Matrix = require("matrix")
 local Dataset = {}
 
--- Base 8x8 pixel prototypes for digits 0-9 (values 0.0 to 1.0)
 local PROTOTYPES = {
 	[0] = {
 		{ 0, 0, 1, 1, 1, 1, 0, 0 },
@@ -109,7 +107,6 @@ local PROTOTYPES = {
 	},
 }
 
--- Clamp utility
 local function clamp(val, min_v, max_v)
 	if val < min_v then
 		return min_v
@@ -120,37 +117,76 @@ local function clamp(val, min_v, max_v)
 	return val
 end
 
--- Apply random translation (-1, 0, +1 px), stroke jitter, and Gaussian-like noise
+-- Bilinear interpolation helper for smooth rotation
+local function sample_bilinear(grid, r, c)
+	local r0 = math.floor(r)
+	local c0 = math.floor(c)
+	local dr = r - r0
+	local dc = c - c0
+
+	local function get_px(rr, cc)
+		if rr < 1 or rr > 8 or cc < 1 or cc > 8 then
+			return 0.0
+		end
+		return grid[rr][cc]
+	end
+
+	local v00 = get_px(r0, c0)
+	local v01 = get_px(r0, c0 + 1)
+	local v10 = get_px(r0 + 1, c0)
+	local v11 = get_px(r0 + 1, c0 + 1)
+
+	return (1 - dr) * ((1 - dc) * v00 + dc * v01) + dr * ((1 - dc) * v10 + dc * v11)
+end
+
+-- Apply random rotation (-15 to +15 deg), translation (-1 to +1 px), occlusion & noise
 function Dataset.augment_grid(grid, noise_level)
-	local shift_r = math.random(-1, 1)
-	local shift_c = math.random(-1, 1)
-	local intensity_scale = 0.8 + math.random() * 0.4
+	local angle_rad = math.rad((math.random() * 2.0 - 1.0) * 15.0)
+	local cos_a = math.cos(angle_rad)
+	local sin_a = math.sin(angle_rad)
+
+	local shift_r = (math.random() * 2.0 - 1.0) * 0.9
+	local shift_c = (math.random() * 2.0 - 1.0) * 0.9
+	local intensity_scale = 0.85 + math.random() * 0.3
+
+	-- Optional 2x2 random cutout patch (30% chance)
+	local use_cutout = math.random() < 0.30
+	local cut_r = math.random(1, 7)
+	local cut_c = math.random(1, 7)
+
+	local cx, cy = 4.5, 4.5
 	local out = {}
 
 	for r = 1, 8 do
 		out[r] = {}
 		for c = 1, 8 do
-			local src_r = r - shift_r
-			local src_c = c - shift_c
-			local base = 0.0
-			if src_r >= 1 and src_r <= 8 and src_c >= 1 and src_c <= 8 then
-				base = grid[src_r][src_c] * intensity_scale
+			local dr = (r - shift_r) - cy
+			local dc = (c - shift_c) - cx
+			local src_r = cy + (dr * cos_a - dc * sin_a)
+			local src_c = cx + (dr * sin_a + dc * cos_a)
+
+			local base = sample_bilinear(grid, src_r, src_c) * intensity_scale
+
+			-- Apply cutout occlusion
+			if use_cutout and (r == cut_r or r == cut_r + 1) and (c == cut_c or c == cut_c + 1) then
+				base = base * 0.15
 			end
-			-- Random pixel dropout or bleed
-			if base > 0.5 and math.random() < 0.08 then
+
+			-- Random stroke dropout or bleed
+			if base > 0.5 and math.random() < 0.06 then
 				base = base * 0.4
-			elseif base == 0 and math.random() < 0.05 then
-				base = 0.25
+			elseif base == 0 and math.random() < 0.04 then
+				base = 0.2
 			end
-			-- Add uniform sensor noise
+
 			local noise = (math.random() * 2.0 - 1.0) * (noise_level or 0.15)
 			out[r][c] = clamp(base + noise, 0.0, 1.0)
 		end
 	end
+
 	return out
 end
 
--- Flatten an 8x8 grid into a 64-element 1D array
 function Dataset.flatten(grid)
 	local flat = {}
 	local idx = 1
@@ -163,7 +199,6 @@ function Dataset.flatten(grid)
 	return flat
 end
 
--- Generate a dataset of N samples with features (N x 64) and one-hot labels (N x 10)
 function Dataset.generate(num_samples, noise_level)
 	local samples = {}
 	for i = 1, num_samples do
@@ -179,7 +214,6 @@ function Dataset.generate(num_samples, noise_level)
 		}
 	end
 
-	-- Fisher-Yates shuffle
 	for i = #samples, 2, -1 do
 		local j = math.random(i)
 		samples[i], samples[j] = samples[j], samples[i]
@@ -188,7 +222,6 @@ function Dataset.generate(num_samples, noise_level)
 	return samples
 end
 
--- Convert a slice of samples into Matrix X (batch x 64) and Matrix Y (batch x 10)
 function Dataset.to_matrices(samples, start_idx, end_idx)
 	local count = end_idx - start_idx + 1
 	local X = Matrix.new(count, 64)

@@ -1,5 +1,5 @@
 # matrix.py
-# I created this file only to be used by network.py and also a further reference of matrix.lua
+# Pure Python 2D Matrix & Math Library (v2: Leaky ReLU, Dropout, Element-wise Ops)
 
 import math
 import random
@@ -15,12 +15,10 @@ class Matrix:
         val = 0.0 if init_val is None else init_val
         self.data = [[val for _ in range(cols)] for _ in range(rows)]
 
-    # Create a new matrix initialized to zero or a default value
     @classmethod
     def new(cls, rows, cols, init_val=0.0):
         return cls(rows, cols, init_val)
 
-    # Create a matrix from a 2D Python list
     @classmethod
     def from_table(cls, tbl):
         rows = len(tbl)
@@ -31,7 +29,7 @@ class Matrix:
                 m.data[r][c] = tbl[r][c]
         return m
 
-    # He/Xavier-style uniform random initialization
+    # He uniform initialization tuned for Leaky ReLU
     @classmethod
     def random(cls, rows, cols, scale=None):
         m = cls.new(rows, cols)
@@ -41,7 +39,17 @@ class Matrix:
                 m.data[r][c] = (random.random() * 2.0 - 1.0) * s
         return m
 
-    # Deep copy a matrix
+    # Generate an Inverted Dropout mask (scales kept neurons by 1 / (1 - drop_rate))
+    @classmethod
+    def dropout_mask(cls, rows, cols, drop_rate):
+        m = cls.new(rows, cols)
+        keep_prob = 1.0 - drop_rate
+        scale = 1.0 / keep_prob
+        for r in range(rows):
+            for c in range(cols):
+                m.data[r][c] = scale if random.random() < keep_prob else 0.0
+        return m
+
     def copy(self):
         m = Matrix.new(self.rows, self.cols)
         for r in range(self.rows):
@@ -49,7 +57,6 @@ class Matrix:
                 m.data[r][c] = self.data[r][c]
         return m
 
-    # Matrix multiplication: self (R x K) * other (K x C) -> (R x C)
     def dot(self, other):
         assert self.cols == other.rows, (
             f"Dimension mismatch in dot product: "
@@ -67,7 +74,6 @@ class Matrix:
                         row_res[c] = row_res[c] + val_a * row_b[c]
         return res
 
-    # Transpose matrix
     def transpose(self):
         res = Matrix.new(self.cols, self.rows)
         for r in range(self.rows):
@@ -75,7 +81,6 @@ class Matrix:
                 res.data[c][r] = self.data[r][c]
         return res
 
-    # Element-wise addition (supports broadcasting a 1xC row vector)
     def add(self, other):
         res = Matrix.new(self.rows, self.cols)
         if other.rows == 1 and other.cols == self.cols:
@@ -91,7 +96,6 @@ class Matrix:
                     res.data[r][c] = self.data[r][c] + other.data[r][c]
         return res
 
-    # Element-wise subtraction
     def sub(self, other):
         assert (
             self.rows == other.rows and self.cols == other.cols
@@ -102,7 +106,6 @@ class Matrix:
                 res.data[r][c] = self.data[r][c] - other.data[r][c]
         return res
 
-    # Element-wise multiplication (Hadamard product)
     def mul(self, other):
         assert (
             self.rows == other.rows and self.cols == other.cols
@@ -113,7 +116,16 @@ class Matrix:
                 res.data[r][c] = self.data[r][c] * other.data[r][c]
         return res
 
-    # Scale all elements by a scalar
+    def div(self, other):
+        assert (
+            self.rows == other.rows and self.cols == other.cols
+        ), "Matrix div dimension mismatch"
+        res = Matrix.new(self.rows, self.cols)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                res.data[r][c] = self.data[r][c] / other.data[r][c]
+        return res
+
     def scale(self, scalar):
         res = Matrix.new(self.rows, self.cols)
         for r in range(self.rows):
@@ -121,7 +133,32 @@ class Matrix:
                 res.data[r][c] = self.data[r][c] * scalar
         return res
 
-    # Apply a function to every element
+    def add_scalar(self, scalar):
+        res = Matrix.new(self.rows, self.cols)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                res.data[r][c] = self.data[r][c] + scalar
+        return res
+
+    def sqrt(self):
+        res = Matrix.new(self.rows, self.cols)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                res.data[r][c] = math.sqrt(self.data[r][c])
+        return res
+
+    def clip(self, min_val, max_val):
+        res = Matrix.new(self.rows, self.cols)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                v = self.data[r][c]
+                if v < min_val:
+                    v = min_val
+                if v > max_val:
+                    v = max_val
+                res.data[r][c] = v
+        return res
+
     def map(self, fn):
         res = Matrix.new(self.rows, self.cols)
         for r in range(self.rows):
@@ -129,7 +166,6 @@ class Matrix:
                 res.data[r][c] = fn(self.data[r][c], r, c)
         return res
 
-    # Sum along axis=1 (collapse rows into a 1xC row vector)
     def sum_rows(self):
         res = Matrix.new(1, self.cols, 0.0)
         for r in range(self.rows):
@@ -137,15 +173,14 @@ class Matrix:
                 res.data[0][c] = res.data[0][c] + self.data[r][c]
         return res
 
-    # ReLU Activation
-    def relu(self):
-        return self.map(lambda x, r, c: x if x > 0 else 0.0)
+    # Leaky ReLU (prevents dying neurons)
+    def leaky_relu(self, alpha=0.01):
+        return self.map(lambda x, r, c: x if x > 0 else (alpha * x))
 
-    # Derivative of ReLU
-    def relu_deriv(self):
-        return self.map(lambda x, r, c: 1.0 if x > 0 else 0.0)
+    def leaky_relu_deriv(self, alpha=0.01):
+        return self.map(lambda x, r, c: 1.0 if x > 0 else alpha)
 
-    # Row-wise numerically stable Softmax
+    # Numerically stable Softmax
     def softmax(self):
         res = Matrix.new(self.rows, self.cols)
         for r in range(self.rows):
@@ -164,7 +199,6 @@ class Matrix:
                 res.data[r][c] = res.data[r][c] / sum_exp
         return res
 
-    # Return index (0-based) of max value per row
     def argmax_rows(self):
         indices = []
         for r in range(self.rows):

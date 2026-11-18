@@ -1,14 +1,11 @@
 -- matrix.lua
--- Pure Lua 2D Matrix & Math Library for Neural Networks
--- The reference file is at references/matrix.py
--- Note: I only created python reference files for matrix.lua and network.lua because they were the ones I was struggling with the most
+-- Pure Lua 2D Matrix & Math Library (v2: Leaky ReLU, Dropout, Element-wise Ops)
 
 local Matrix = {}
 Matrix.__index = Matrix
 
 math.randomseed(os.time())
 
--- Create a new matrix initialized to zero or a default value
 function Matrix.new(rows, cols, init_val)
 	local self = setmetatable({}, Matrix)
 	self.rows = rows
@@ -24,10 +21,9 @@ function Matrix.new(rows, cols, init_val)
 	return self
 end
 
--- Create a matrix from a 2D Lua table
 function Matrix.from_table(tbl)
 	local rows = #tbl
-	local cols = #tbl[1]
+	local cols = #tbl
 	local m = Matrix.new(rows, cols)
 	for r = 1, rows do
 		for c = 1, cols do
@@ -37,7 +33,7 @@ function Matrix.from_table(tbl)
 	return m
 end
 
--- He/Xavier-style uniform random initialization
+-- He uniform initialization tuned for Leaky ReLU
 function Matrix.random(rows, cols, scale)
 	local m = Matrix.new(rows, cols)
 	local s = scale or math.sqrt(2.0 / rows)
@@ -49,7 +45,19 @@ function Matrix.random(rows, cols, scale)
 	return m
 end
 
--- Deep copy a matrix
+-- Generate an Inverted Dropout mask (scales kept neurons by 1 / (1 - drop_rate))
+function Matrix.dropout_mask(rows, cols, drop_rate)
+	local m = Matrix.new(rows, cols)
+	local keep_prob = 1.0 - drop_rate
+	local scale = 1.0 / keep_prob
+	for r = 1, rows do
+		for c = 1, cols do
+			m.data[r][c] = (math.random() < keep_prob) and scale or 0.0
+		end
+	end
+	return m
+end
+
 function Matrix:copy()
 	local m = Matrix.new(self.rows, self.cols)
 	for r = 1, self.rows do
@@ -60,7 +68,6 @@ function Matrix:copy()
 	return m
 end
 
--- Matrix multiplication: self (R x K) * other (K x C) -> (R x C)
 function Matrix:dot(other)
 	assert(
 		self.cols == other.rows,
@@ -89,7 +96,6 @@ function Matrix:dot(other)
 	return res
 end
 
--- Transpose matrix
 function Matrix:transpose()
 	local res = Matrix.new(self.cols, self.rows)
 	for r = 1, self.rows do
@@ -100,13 +106,12 @@ function Matrix:transpose()
 	return res
 end
 
--- Element-wise addition (supports broadcasting a 1xC row vector)
 function Matrix:add(other)
 	local res = Matrix.new(self.rows, self.cols)
 	if other.rows == 1 and other.cols == self.cols then
 		for r = 1, self.rows do
 			for c = 1, self.cols do
-				res.data[r][c] = self.data[r][c] + other.data[1][c]
+				res.data[r][c] = self.data[r][c] + other.data[c]
 			end
 		end
 	else
@@ -120,7 +125,6 @@ function Matrix:add(other)
 	return res
 end
 
--- Element-wise subtraction
 function Matrix:sub(other)
 	assert(self.rows == other.rows and self.cols == other.cols, "Matrix sub dimension mismatch")
 	local res = Matrix.new(self.rows, self.cols)
@@ -132,7 +136,6 @@ function Matrix:sub(other)
 	return res
 end
 
--- Element-wise multiplication (Hadamard product)
 function Matrix:mul(other)
 	assert(self.rows == other.rows and self.cols == other.cols, "Matrix mul dimension mismatch")
 	local res = Matrix.new(self.rows, self.cols)
@@ -144,7 +147,17 @@ function Matrix:mul(other)
 	return res
 end
 
--- Scale all elements by a scalar
+function Matrix:div(other)
+	assert(self.rows == other.rows and self.cols == other.cols, "Matrix div dimension mismatch")
+	local res = Matrix.new(self.rows, self.cols)
+	for r = 1, self.rows do
+		for c = 1, self.cols do
+			res.data[r][c] = self.data[r][c] / other.data[r][c]
+		end
+	end
+	return res
+end
+
 function Matrix:scale(scalar)
 	local res = Matrix.new(self.rows, self.cols)
 	for r = 1, self.rows do
@@ -155,7 +168,43 @@ function Matrix:scale(scalar)
 	return res
 end
 
--- Apply a function to every element
+function Matrix:add_scalar(scalar)
+	local res = Matrix.new(self.rows, self.cols)
+	for r = 1, self.rows do
+		for c = 1, self.cols do
+			res.data[r][c] = self.data[r][c] + scalar
+		end
+	end
+	return res
+end
+
+function Matrix:sqrt()
+	local res = Matrix.new(self.rows, self.cols)
+	for r = 1, self.rows do
+		for c = 1, self.cols do
+			res.data[r][c] = math.sqrt(self.data[r][c])
+		end
+	end
+	return res
+end
+
+function Matrix:clip(min_val, max_val)
+	local res = Matrix.new(self.rows, self.cols)
+	for r = 1, self.rows do
+		for c = 1, self.cols do
+			local v = self.data[r][c]
+			if v < min_val then
+				v = min_val
+			end
+			if v > max_val then
+				v = max_val
+			end
+			res.data[r][c] = v
+		end
+	end
+	return res
+end
+
 function Matrix:map(fn)
 	local res = Matrix.new(self.rows, self.cols)
 	for r = 1, self.rows do
@@ -166,32 +215,32 @@ function Matrix:map(fn)
 	return res
 end
 
--- Sum along axis=1 (collapse rows into a 1xC row vector)
 function Matrix:sum_rows()
 	local res = Matrix.new(1, self.cols, 0.0)
 	for r = 1, self.rows do
 		for c = 1, self.cols do
-			res.data[1][c] = res.data[1][c] + self.data[r][c]
+			res.data[c] = res.data[c] + self.data[r][c]
 		end
 	end
 	return res
 end
 
--- ReLU Activation
-function Matrix:relu()
+-- Leaky ReLU (prevents dying neurons)
+function Matrix:leaky_relu(alpha)
+	local a = alpha or 0.01
 	return self:map(function(x)
-		return x > 0 and x or 0
+		return x > 0 and x or (a * x)
 	end)
 end
 
--- Derivative of ReLU
-function Matrix:relu_deriv()
+function Matrix:leaky_relu_deriv(alpha)
+	local a = alpha or 0.01
 	return self:map(function(x)
-		return x > 0 and 1.0 or 0.0
+		return x > 0 and 1.0 or a
 	end)
 end
 
--- Row-wise numerically stable Softmax
+-- Numerically stable Softmax
 function Matrix:softmax()
 	local res = Matrix.new(self.rows, self.cols)
 	for r = 1, self.rows do
@@ -214,12 +263,11 @@ function Matrix:softmax()
 	return res
 end
 
--- Return index (1-based) of max value per row
 function Matrix:argmax_rows()
 	local indices = {}
 	for r = 1, self.rows do
 		local best_c = 1
-		local best_v = self.data[r][1]
+		local best_v = self.data[r]
 		for c = 2, self.cols do
 			if self.data[r][c] > best_v then
 				best_v = self.data[r][c]

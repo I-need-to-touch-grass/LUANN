@@ -1,5 +1,5 @@
 -- main.lua
--- Entry Point: Train, Evaluate, Save, and Test the Lua Digit Classifier
+-- Entry Point (v2): Adam + Cosine Annealing + Loss Curve + Interactive Drawing Pad
 
 local Matrix = require("matrix")
 local Dataset = require("dataset")
@@ -8,17 +8,17 @@ local Serializer = require("serializer")
 local Visualizer = require("visualizer")
 
 local CONFIG = {
-	train_samples = 2000,
-	test_samples = 500,
-	noise_level = 0.18,
-	architecture = { 64, 48, 24, 10 },
-	epochs = 35,
+	train_samples = 3000,
+	test_samples = 600,
+	noise_level = 0.16,
+	architecture = { 64, 64, 32, 10 },
+	epochs = 40,
 	batch_size = 32,
-	lr = 0.06,
-	lr_decay = 0.96,
-	momentum = 0.9,
+	lr_max = 0.008,
+	lr_min = 0.0002,
+	dropout = 0.15,
 	l2_reg = 0.0004,
-	model_path = "digit_model.txt",
+	model_path = "digit_model_v2.txt",
 }
 
 local function shuffle_samples(list)
@@ -28,36 +28,50 @@ local function shuffle_samples(list)
 	end
 end
 
+-- Cosine Annealing Learning Rate Schedule
+local function cosine_lr(epoch, max_epochs, lr_max, lr_min)
+	local progress = (epoch - 1) / math.max(1, max_epochs - 1)
+	return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + math.cos(math.pi * progress))
+end
+
 local function train_model()
-	print("====================================================")
-	print("   PURE LUA HANDWRITTEN DIGIT CLASSIFIER (8x8 MLP)  ")
-	print("====================================================")
-	print(string.format("Generating %d training & %d test samples...", CONFIG.train_samples, CONFIG.test_samples))
+	print("=======================================================")
+	print("  PURE LUA DIGIT CLASSIFIER v2 (Adam + Dropout + Pad)  ")
+	print("=======================================================")
+	print(
+		string.format(
+			"Generating %d training & %d test samples (with rotation & cutout)...",
+			CONFIG.train_samples,
+			CONFIG.test_samples
+		)
+	)
 
 	local train_data = Dataset.generate(CONFIG.train_samples, CONFIG.noise_level)
 	local test_data = Dataset.generate(CONFIG.test_samples, CONFIG.noise_level)
-
 	local X_test, Y_test, y_test_labels = Dataset.to_matrices(test_data, 1, #test_data)
 
 	local net = Network.new(CONFIG.architecture, {
-		lr = CONFIG.lr,
-		momentum = CONFIG.momentum,
+		lr = CONFIG.lr_max,
+		dropout = CONFIG.dropout,
 		l2_reg = CONFIG.l2_reg,
 	})
 
 	print(
 		string.format(
-			"Architecture: %s | Epochs: %d | Batch Size: %d\n",
+			"Architecture: %s | Optimizer: Adam | Dropout: %.0f%%\n",
 			table.concat(CONFIG.architecture, " -> "),
-			CONFIG.epochs,
-			CONFIG.batch_size
+			CONFIG.dropout * 100
 		)
 	)
 
+	local train_history = {}
+	local test_history = {}
 	local start_time = os.clock()
 
 	for epoch = 1, CONFIG.epochs do
 		shuffle_samples(train_data)
+		net.lr = cosine_lr(epoch, CONFIG.epochs, CONFIG.lr_max, CONFIG.lr_min)
+
 		local epoch_loss = 0.0
 		local num_batches = 0
 
@@ -65,7 +79,7 @@ local function train_model()
 			local end_idx = math.min(i + CONFIG.batch_size - 1, #train_data)
 			local X_batch, Y_batch = Dataset.to_matrices(train_data, i, end_idx)
 
-			local probs = net:forward(X_batch)
+			local probs = net:forward(X_batch, true)
 			local loss = net:compute_loss(probs, Y_batch)
 			net:backward(Y_batch)
 
@@ -73,17 +87,19 @@ local function train_model()
 			num_batches = num_batches + 1
 		end
 
-		-- Decay learning rate each epoch
-		net.lr = net.lr * CONFIG.lr_decay
+		local avg_train_loss = epoch_loss / num_batches
+		local test_acc, test_loss = net:evaluate(X_test, Y_test, y_test_labels)
+
+		train_history[epoch] = avg_train_loss
+		test_history[epoch] = test_loss
 
 		if epoch == 1 or epoch % 5 == 0 or epoch == CONFIG.epochs then
-			local test_acc, test_loss = net:evaluate(X_test, Y_test, y_test_labels)
 			print(
 				string.format(
-					"Epoch %2d/%d | Train Loss: %.4f | Test Loss: %.4f | Test Acc: %6.2f%% | LR: %.4f",
+					"Epoch %2d/%d | Train Loss: %.4f | Test Loss: %.4f | Test Acc: %6.2f%% | LR: %.5f",
 					epoch,
 					CONFIG.epochs,
-					epoch_loss / num_batches,
+					avg_train_loss,
 					test_loss,
 					test_acc * 100,
 					net.lr
@@ -95,7 +111,6 @@ local function train_model()
 	local elapsed = os.clock() - start_time
 	print(string.format("\nTraining completed in %.2f seconds.", elapsed))
 
-	-- Save trained model
 	local ok, err = Serializer.save(net, CONFIG.model_path)
 	if ok then
 		print("Saved trained weights to: " .. CONFIG.model_path)
@@ -103,58 +118,49 @@ local function train_model()
 		print("Warning: " .. tostring(err))
 	end
 
-	-- Reload to verify serialization integrity
 	local loaded_net = Serializer.load(CONFIG.model_path) or net
-	local preds, _, probs = loaded_net:predict(X_test)
+	local preds = loaded_net:predict(X_test)
+
+	Visualizer.print_loss_curve(train_history, test_history)
 	Visualizer.print_confusion_matrix(y_test_labels, preds)
 
-	return loaded_net, test_data, probs
+	return loaded_net
 end
 
-local function interactive_loop(net)
-	print("Interactive Mode:")
-	print("  - Enter a digit (0-9) to generate a noisy sample and classify it")
-	print("  - Enter 'r' for a random noisy digit")
-	print("  - Enter 'q' to quit\n")
-
+local function interactive_menu(net)
 	while true do
-		io.write("Command [0-9 / r / q]: ")
+		print("Interactive Menu:")
+		print("  [0-9] : Generate and classify a rotated/noisy digit")
+		print("  [r]   : Classify a random noisy digit")
+		print("  [d]   : Open the 8x8 Interactive Drawing Pad")
+		print("  [q]   : Quit")
+		io.write("Choice: ")
+
 		local input = io.read("*l")
 		if not input or input == "q" or input == "Q" then
 			print("Exiting.")
 			break
-		end
-
-		local digit
-		if input == "r" or input == "R" then
-			digit = math.random(0, 9)
-		else
-			digit = tonumber(input)
-		end
-
-		if digit and digit >= 0 and digit <= 9 and math.floor(digit) == digit then
-			local proto = Dataset.get_prototype(digit)
-			local aug = Dataset.augment_grid(proto, CONFIG.noise_level)
+		elseif input == "d" or input == "D" then
+			Visualizer.drawing_pad(net)
+		elseif input == "r" or input == "R" then
+			local digit = math.random(0, 9)
+			local aug = Dataset.augment_grid(Dataset.get_prototype(digit), CONFIG.noise_level)
 			local flat = Dataset.flatten(aug)
-			local X_single = Matrix.from_table({ flat })
-
-			local preds, _, probs = net:predict(X_single)
-			Visualizer.render_prediction(flat, digit, preds[1], probs.data[1])
+			local preds, _, probs = net:predict(Matrix.from_table({ flat }))
+			Visualizer.render_prediction(flat, digit, preds, probs.data)
 		else
-			print("Invalid input. Please enter 0-9, 'r', or 'q'.")
+			local digit = tonumber(input)
+			if digit and digit >= 0 and digit <= 9 and math.floor(digit) == digit then
+				local aug = Dataset.augment_grid(Dataset.get_prototype(digit), CONFIG.noise_level)
+				local flat = Dataset.flatten(aug)
+				local preds, _, probs = net:predict(Matrix.from_table({ flat }))
+				Visualizer.render_prediction(flat, digit, preds, probs.data)
+			else
+				print("Invalid choice.\n")
+			end
 		end
 	end
 end
 
--- Run pipeline
-local net, test_data, test_probs = train_model()
-
-print("Sample Test Predictions:")
-for i = 1, 3 do
-	local sample = test_data[i]
-	local X_s = Matrix.from_table({ sample.x })
-	local preds = net:predict(X_s)
-	Visualizer.render_prediction(sample.x, sample.label, preds[1], test_probs.data[i])
-end
-
-interactive_loop(net)
+local net = train_model()
+interactive_menu(net)
